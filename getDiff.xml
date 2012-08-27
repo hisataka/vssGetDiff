@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="Shift_JIS" ?>
+<getDiff>
+	<vss>
+		<ssUser>xxxx</ssUser>
+		<ssPwd>xxxx</ssPwd>
+		<ssDir>\\xxxx\xxxx\</ssDir>
+		<instDir>C:\Program Files\Microsoft Visual SourceSafe\</instDir>
+		<projectNm>$/xxxx</projectNm>
+	</vss>
+	<dir>
+		<outDir>C:\xxx\getDiff\out\</outDir>
+		<tempOutDir>tempFiles</tempOutDir>
+		<fileOutDir>getFiles</fileOutDir>
+		<diffLog>diffLog.txt</diffLog>
+		<getDiffLog>log.txt</getDiffLog>
+		<report>report.csv</report>
+	</dir>
+	<getDate>12/09/01;00:00</getDate>
+</getDiff>

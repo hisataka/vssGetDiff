@@ -1,0 +1,486 @@
+<?xml version="1.0" encoding="Shift_JIS" standalone="yes" ?>
+<package>
+	<job id="getDiff">
+		<runtime>
+			<description>
+差分取得君
+
+・指定日付から更新されたファイルを取得する。
+・差分のレポートを出力する。
+			</description>
+			<named
+				name="ssUser"
+				helpstring="VSSのユーザー"
+				type="string"
+				required="false"
+			/>
+			<named
+				name="ssPwd"
+				helpstring="VSSのパスワード"
+				type="string"
+				required="false"
+			/>
+			<named
+				name="ssDir"
+				helpstring="VSSのDB初期化ファイル配置ディレクトリ"
+				type="string"
+				required="false"
+			/>
+			<named
+				name="Date"
+				helpstring="差分の比較元日付(YY/MM/DD;HH:MM)"
+				type="string"
+				required="false"
+			/>
+			<example>Example: getDiff.wsf /ssUser:foo /ssPwd:bar /ssDir:C:\VSS\ /Date:10/04/01;00:00</example>
+		</runtime>
+		<resource id="SOFT_NAME">差分取得君</resource>
+		<resource id="SOFT_VERSION">2.2</resource>
+		<resource id="CONFFILE_NAME">getDiff.xml</resource>
+		<resource id="ACTION_ADD">0</resource>
+		<resource id="ACTION_DEL">1</resource>
+		<resource id="ACTION_MOD">2</resource>
+		<resource id="SUCCESS">0</resource>
+		<resource id="ERROR">1</resource>
+		<resource id="WORNING">2</resource>
+		<resource id="INFO">4</resource>
+		<resource id="YY">20</resource>
+		<object id="objFs" progid="Scripting.FileSystemObject" />
+		<object id="objShell" progid="WScript.Shell" />
+		<object id="objXml" progid="Msxml2.DOMDocument" />
+		<script language="JScript"><![CDATA[
+
+		// 強制的にCScriptで実行する
+		var enmArg; //As Enumerator  引数コレクション
+		var Cmd = new String("");
+
+		// 引数コレクションの生成
+		enmArg = new Enumerator(WScript.Arguments);
+
+		// スクリプトエンジン判定
+		if(String(WScript.FullName).search(/.*WScript\.Exe$/gi) >= 0){
+			// WScriptの場合は、CScriptでリスタートする
+			// 基本コマンド
+			Cmd += "cmd /k CScript //nologo \"" + WScript.ScriptFullName + "\"";
+
+			// 引数を列挙し、コマンドに付加する
+			// 付加する場合は二重引用符で囲む
+			for (; !enmArg.atEnd(); enmArg.moveNext()){
+				Cmd += " \"" + enmArg.item() + "\"";
+			}
+			
+			// スクリプトをリスタート
+			new ActiveXObject("WScript.Shell").Run(Cmd, 1, false);
+			// 処理中断
+			WScript.Quit();
+		}
+		
+		// 設定情報を格納する変数
+		var instDir; // VSSのインストールディレクトリ
+		var projectNm; // 使用するプロジェクト名
+		var outDir; // 出力するディレクトリルート
+		var fileOutDir; // 取得したファイルを出力するディレクトリ
+		var tempOutDir; // 添付ファイルの出力ディレクトリ
+		var diffLog; // diff結果ログのファイル名
+		var getDiffLog; // getDiffの出力するログファイル名
+		var report; // getDiffが出力するレポートファイル名
+		var getDate; // 差分の比較元
+		var ssUser; // VSSのユーザー
+		var ssPwd; // VSSのパスワード
+		var ssDir; // VSSのiniファイル置き場
+
+		// テキスト解析用の正規表現
+		var regSection = /^比較元: *(.*)$/;
+		var regSectionEnd = /^比較先.*$/;
+		var regDel = /^カレント プロジェクトにないローカル ファイル:$/;
+		var regAdd = /^SourceSafe カレント フォルダに含まれていないファイル:$/;
+		var regMod = /^SourceSafe ローカル ファイルと異なるファイル:$/;
+		var regFileName = /^  (.+)$/;
+		var regCheckInDate = /^ *日付: *(\d{1,2}\/\d{1,2}\/\d{1,2}) *(\d{1,2}:\d{1,2}) *日付.*$/;
+		var regDatePattern = /^([0-9][0-9])\/(0[1-9]|1[0-2])\/(0[1-9]|[1-2][0-9]|3[0-1]);(0[0-9]|1[0-9]|2[0-3]):([0-5][0-9])$/;
+		var regArg = /^(\/ssUser:.+)|(\/ssPwd:.+)|(\/ssDir:.+)|(\/Date:.+)$/;
+
+		// 変更ファイルの情報を保持する
+		var addFileList = new Array();
+		var delFileList = new Array();
+		var modFileList = new Array();
+		var addCount = 0;
+		var delCount = 0;
+		var modCount = 0;
+
+		// ログなど出力用バッファ
+		var reportBuf = "ソース,操作,日時,備考\n";
+		var getDiffLogBuf = "";
+
+		main();
+
+		// メイン処理
+		function main() {
+			var objTs;
+			var command;
+
+			log("INFO", "メイン処理", "開始");
+
+			// 引数を処理
+			initArgument();
+			
+			// 設定ファイルの読み込み
+			readConf();
+
+			// 環境の設定
+			initEnv();
+			
+			// 指定日付のバージョンを取得
+			WScript.Echo(getDate + "のプロジェクト情報を取得しています...");
+			WScript.Echo("この処理には少し時間が掛かります。\n");
+			command = "\"" + instDir + "ss.exe\" Get \"" + projectNm + "\" -Vd" + getDate + "a -W -R -I-Y -GL\"" + outDir + tempOutDir + "\"";
+			objShell.Run(command, 0, true);
+			log("INFO", "メイン処理", command);
+
+			// 最新バージョンと比較する
+			WScript.Echo("最新バージョンと比較しています...");
+			command = "%ComSpec% /c (cd " + outDir + tempOutDir + ")&\"" + instDir + "ss.exe\" Diff -R \"" + projectNm + "\" > \"" + outDir + diffLog + "\"";
+			objShell.Run(command, 0, true);
+			log("INFO", "メイン処理", command);
+			
+			// diff結果ログを解析する
+			diffLogAnalysis();
+
+			// ADDを処理する
+			getFiles(getResource("ACTION_ADD"), addFileList);
+			
+			// MODを処理する
+			getFiles(getResource("ACTION_MOD"), modFileList);
+			
+			// DELを処理する
+			getFiles(getResource("ACTION_DEL"), delFileList);
+
+			// レポートを出力する
+			objTs = objFs.OpenTextFile(outDir + report, 8, -1);
+			objTs.Write(reportBuf);
+			objTs.Close();
+
+			log("INFO", "メイン処理", "終了");
+			
+			// ログを出力する
+			objTs = objFs.OpenTextFile(outDir + getDiffLog, 8, -1);
+			objTs.Write(getDiffLogBuf);
+			objTs.Close();
+		}
+
+		// 引数処理
+		function initArgument() {
+			log("INFO", "引数処理", "開始");
+			
+			// 引数の妥当性チェック
+			for(var i = 0; i < WScript.Arguments.length; i ++) {
+				if(WScript.Arguments.item(i).match(regArg) == null) {
+					log("ERROR", "引数処理", "妥当性チェックエラー ");
+					WScript.Arguments.ShowUsage();
+					WScript.Quit(1);
+				}
+			}
+
+			// 日付指定
+			if (WScript.Arguments.Named.Exists("Date")) {
+				// 日付書式をチェック
+				if(WScript.Arguments.Named.Item("Date").match(regDatePattern) == null) {
+					log("ERROR", "引数処理", "日付書式と一致しないパターン " + WScript.Arguments.Named.Item("Date"));
+					WScript.Arguments.ShowUsage();
+					WScript.Quit(1);
+				} else {
+					getDate = WScript.Arguments.Named.Item("Date");
+					log("INFO", "引数処理", "Date=" + getDate);
+				}
+			}
+			
+			if (WScript.Arguments.Named.Exists("ssUser")) {
+				if(WScript.Arguments.Named.Item("ssUser") == null) {
+					log("ERROR", "引数処理", "ssUserの値が指定されていない " + WScript.Arguments.Named.Item("ssUser"));
+					WScript.Arguments.ShowUsage();
+					WScript.Quit(1);
+				} else {
+					ssUser = WScript.Arguments.Named.Item("ssUser");
+					log("INFO", "引数処理", "ssUser=" + ssUser);
+				}
+			}
+
+			if (WScript.Arguments.Named.Exists("ssPwd")) {
+				if(WScript.Arguments.Named.Item("ssPwd") == null) {
+					log("ERROR", "引数処理", "ssPwdの値が指定されていない " + WScript.Arguments.Named.Item("ssPwd"));
+					WScript.Arguments.ShowUsage();
+					WScript.Quit(1);
+				} else {
+					ssPwd = WScript.Arguments.Named.Item("ssPwd");
+					log("INFO", "引数処理", "ssPwd=" + ssPwd);
+				}
+			}
+			if (WScript.Arguments.Named.Exists("ssDir")) {
+				if(WScript.Arguments.Named.Item("ssDir") == null) {
+					log("ERROR", "引数処理", "ssDirの値が指定されていない " + WScript.Arguments.Named.Item("ssDir"));
+					WScript.Arguments.ShowUsage();
+					WScript.Quit(1);
+				} else {
+					ssDir = WScript.Arguments.Named.Item("ssDir");
+					log("INFO", "引数処理", "ssDir=" + ssDir);
+				}
+			}
+			log("INFO", "引数処理", "終了");
+		}
+		
+		// 設定ファイルの読み込み
+		function readConf() {
+			log("INFO", "設定ファイル読み込み", "開始");
+
+			objXml.async = false;
+			objXml.load(getResource("CONFFILE_NAME"));
+			instDir = (objXml.selectSingleNode("/getDiff/vss/instDir")).text;
+			projectNm = (objXml.selectSingleNode("/getDiff/vss/projectNm")).text;
+			outDir = (objXml.selectSingleNode("/getDiff/dir/outDir")).text;
+			tempOutDir = (objXml.selectSingleNode("/getDiff/dir/tempOutDir")).text;
+			fileOutDir = (objXml.selectSingleNode("/getDiff/dir/fileOutDir")).text;
+			diffLog = (objXml.selectSingleNode("/getDiff/dir/diffLog")).text;
+			getDiffLog = (objXml.selectSingleNode("/getDiff/dir/getDiffLog")).text;
+			report = (objXml.selectSingleNode("/getDiff/dir/report")).text;
+			
+			if (!WScript.Arguments.Named.Exists("Date")) {
+				// 引数で渡されていなければ設定ファイルから取得
+				getDate = (objXml.selectSingleNode("/getDiff/getDate")).text;
+			}
+			if (!WScript.Arguments.Named.Exists("ssUser")) {
+				// 引数で渡されていなければ設定ファイルから取得
+				ssUser = (objXml.selectSingleNode("/getDiff/vss/ssUser")).text;
+			}
+			if (!WScript.Arguments.Named.Exists("ssPwd")) {
+				// 引数で渡されていなければ設定ファイルから取得
+				ssPwd = (objXml.selectSingleNode("/getDiff/vss/ssPwd")).text;
+			}
+			if (!WScript.Arguments.Named.Exists("ssDir")) {
+				// 引数で渡されていなければ設定ファイルから取得
+				ssDir = (objXml.selectSingleNode("/getDiff/vss/ssDir")).text;
+			}
+			
+
+			log("INFO", "設定ファイル読み込み", "ssUser=" + ssUser + ", ssPwd=" + ssPwd + ", ssDir=" + ssDir + ", instDir=" + instDir + ", projectNm=" + projectNm + ", outDir=" + outDir + ", tempOutDir=" + tempOutDir + ", fileOutDir=" + fileOutDir + ", diffLog=" + diffLog + ", getDiffLog=" + getDiffLog + ", report=" + report + ", getDate=" + getDate);
+			log("INFO", "設定ファイル読み込み", "終了");
+		}
+		
+		// 環境の設定
+		function initEnv() {
+			log("INFO", "環境設定", "開始");
+
+			var objEnv;
+			// 環境変数をセット
+			objEnv = objShell.Environment("Process");
+			objEnv.Item("ssUser") = ssUser;
+			objEnv.Item("ssPwd") = ssPwd;
+			objEnv.Item("ssDir") = ssDir;
+			
+			log("INFO", "環境設定", "ssUser=" + objEnv.Item("ssUser") + ", ssPwd=" + objEnv.Item("ssPwd") + ", ssDir=" + objEnv.Item("ssDir"));
+
+			// ファイルを削除
+			if(objFs.FolderExists(outDir + fileOutDir) != 0) {
+				objFs.DeleteFolder(outDir + fileOutDir, -1);
+				log("INFO", "環境設定", "フォルダ削除 " + outDir + fileOutDir);
+			}
+			if(objFs.FolderExists(outDir + tempOutDir) != 0) {
+				objFs.DeleteFolder(outDir + tempOutDir, -1);
+				log("INFO", "環境設定", "フォルダ削除 " + outDir + tempOutDir);
+			}
+			if(objFs.FileExists(outDir + diffLog) != 0) {
+				objFs.DeleteFile(outDir + diffLog, -1);
+				log("INFO", "環境設定", "ファイル削除 " + outDir + diffLog);
+			}
+			
+			if(objFs.FileExists(outDir + report) != 0) {
+				objFs.DeleteFile(outDir + report, -1);
+				log("INFO", "環境設定", "ファイル削除 " + outDir + report);
+			}
+			
+			if(objFs.FileExists(outDir + getDiffLog) != 0) {
+				objFs.DeleteFile(outDir + getDiffLog, -1);
+				log("INFO", "環境設定", "ファイル削除 " + outDir + getDiffLog);
+			}
+			
+			// フォルダを作成
+			objFs.CreateFolder(outDir + fileOutDir);
+			log("INFO", "環境設定", "フォルダ作成 " + outDir + fileOutDir);
+			objFs.CreateFolder(outDir + tempOutDir);
+			log("INFO", "環境設定", "フォルダ作成 " + outDir + tempOutDir);
+						
+			log("INFO", "環境設定", "終了");
+		}
+		
+		// リストを処理してファイルを取得する
+		function getFiles(action, fileList) {
+			log("INFO", "ファイル取得", "開始");
+			var command;
+			var date;
+			var actionList = new Array(3);
+			actionList[getResource("ACTION_ADD")] = "追加";
+			actionList[getResource("ACTION_DEL")] = "削除";
+			actionList[getResource("ACTION_MOD")] = "更新";
+		
+			for(var i = 0; i < fileList.length; i ++) {
+				date = getCheckInDate(fileList[i]);
+				var oldDate = Date.parse(getResource("YY") + getDate.replace(/;/, " "));
+				var newDate = Date.parse(getResource("YY") + date);
+				
+				reportBuf += fileList[i] + "," + actionList[action] + "," + date;
+				
+				switch(action) {
+					case getResource("ACTION_ADD") :
+					case getResource("ACTION_MOD") :
+						// チェックイン日付と、指定日付を比較し、チェックイン日付のほうが古ければ取得しない
+						if(oldDate > newDate) {
+							reportBuf += ",チェックイン日付が指定日より古いため、ファイル取得を行いませんでした。\n"
+						} else {
+							// ファイルを取得する
+							WScript.Echo(fileList[i] + "を取得しています...");
+							command = "\"" + instDir + "ss.exe\" Get \"" + fileList[i] + "\" -W -I-Y -GTU -GL\"" + outDir + fileOutDir + "\"";
+							objShell.Run(command, 0, true);
+							log("INFO", "ファイル取得", command);
+							reportBuf += "\n";
+						}
+						break;
+					case getResource("ACTION_DEL") :
+						log("INFO", "ファイル取得", "削除リストを処理 " + fileList[i]);
+						reportBuf += "\n";
+						break;
+					default :
+						break;
+				}
+			}
+
+			log("INFO", "ファイル取得", "終了");
+		}
+		
+		// ファイルのチェックイン日付を取得する
+		function getCheckInDate(fileName) {
+			log("INFO", "ファイル日付取得", "開始");
+			var command = "\"" + instDir + "ss.exe\" Properties \"" + fileName + "\"";
+			var objExec = objShell.Exec(command);
+			log("INFO", "ファイル日付取得", command);
+			var strLine = "";
+			var ret;
+			var date = "";
+
+			while(objExec.stdout.AtEndOfStream != true) {
+				strLine = objExec.stdout.ReadLine();
+				
+				if(strLine.match(regCheckInDate) != null) {
+					ret = strLine.match(regCheckInDate);
+					date = ret[1] + " " + ret[2];
+					break;
+				}
+			}
+			
+			log("INFO", "ファイル日付取得", "終了");
+			return date;
+		}
+		
+		// diffLogを解析する
+		function diffLogAnalysis() {
+			log("INFO", "Diff解析", "開始");
+
+			var objTs = objFs.OpenTextFile(outDir + diffLog, 1)
+			var strLine = "";
+			var ret = "";
+
+			// 1行先読みする
+			strLine = objTs.ReadLine();
+			while(!objTs.AtEndOfStream) {
+				var section = "";
+				var sectionBuf = "";
+				if(strLine.match(regSection) == null) {
+					// 次のセクションまで読み飛ばす
+					strLine = objTs.ReadLine();
+					continue;
+				}
+				
+				// regSectionを処理
+				// regSectionEndまでを読み取り、改行を削除する
+				ret = strLine.match(regSection);
+				sectionBuf = ret[1];
+				while(!objTs.AtEndOfStream) {
+					strLine = objTs.ReadLine();
+					if(strLine.match(regSectionEnd) != null) {
+						section = sectionBuf.replace(/[\r\n]*/gi, "");
+						break;
+					}
+					sectionBuf += strLine;
+				}
+				log("INFO", "Diff解析", "セクション " + section);
+				
+				while(!objTs.AtEndOfStream) {
+					if(strLine.match(regSection) != null) {
+						// 次のセクションが来たら終了
+						break;
+					} else if(strLine.match(regAdd) != null) {
+						// 追加
+						log("INFO", "Diff解析", "追加 " + strLine);
+						while(!objTs.AtEndOfStream) {
+							strLine = objTs.ReadLine();
+							if(strLine.match(regFileName) == null) {
+								break;
+							}
+							ret = strLine.match(regFileName);
+							addFileList[addCount ++] = section + "/" + ret[1];
+							
+							log("INFO", "Diff解析", "追加 ：" + ret[1]);
+						}
+					} else if(strLine.match(regDel) != null) {
+						// 削除
+						log("INFO", "Diff解析", "削除 " + strLine);
+						while(!objTs.AtEndOfStream) {
+							strLine = objTs.ReadLine();
+							if(strLine.match(regFileName) == null) {
+								break;
+							}
+							ret = strLine.match(regFileName);
+							delFileList[delCount ++] = section + "/" + ret[1];
+							log("INFO", "Diff解析", "削除 ：" + ret[1]);
+						}
+					} else if(strLine.match(regMod) != null) {
+						// 更新
+						log("INFO", "Diff解析", "更新 " + strLine);
+						while(!objTs.AtEndOfStream) {
+							strLine = objTs.ReadLine();
+							if(strLine.match(regFileName) == null) {
+								break;
+							}
+							ret = strLine.match(regFileName);
+							modFileList[modCount ++] = section + "/" + ret[1];
+							log("INFO", "Diff解析", "更新 ：" + ret[1]);
+						}
+					} else {
+						// 行を進める
+						strLine = objTs.ReadLine();
+					}
+					
+				}
+			}
+			objTs.Close();
+
+			log("INFO", "Diff解析", "終了");
+		}
+		
+		// ログを記録する
+		function log(level, proc, log) {
+			var levelList = new Array();
+			levelList[getResource("SUCCESS")] = "成功";
+			levelList[getResource("ERROR")] = "エラー";
+			levelList[getResource("WORNING")] = "警告";
+			levelList[getResource("INFO")] = "情報";
+			var msg;
+		
+			msg = new Date() + "：" + levelList[getResource(level)] + "[" + proc + "]：" + log + "\n";
+			getDiffLogBuf += msg;
+			
+			// イベントログにも出力する場合は下のコメントを外す
+			//objShell.LogEvent(getResource(level), msg);
+		}
+
+		]]></script>
+	</job>
+</package>
